@@ -3,6 +3,8 @@
 import sys
 import optparse
 import requests
+from datetime import datetime
+from sql import SQL, sql_sink 
 
 class request:
     parameters = {
@@ -63,6 +65,10 @@ class hist_price_data:
         return float(self.dict_["Open"])
     def adj_close(self):
         return float(self.dict_["Adj_Close"])
+    def values(self):
+        return [self.symbol(), datetime.strptime(self.date(), "%Y-%m-%d").date(), self.volume(), self.high(), self.low(), self.close(), self.open(), self.adj_close()]
+    def __str__(self):
+        return "%s,%s,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n" % (self.symbol(), self.date(), self.volume(), self.high(), self.low(), self.close(), self.open(), self.adj_close())
 
 class hist_price_list:
     def __init__(self, symbol):
@@ -73,7 +79,7 @@ class hist_price_list:
         assert entry.date() not in self.data_map_
         self.data_map_[entry.date()] = entry
     def items(self):
-        return [self.data_map_[k] for k in sorted(self.data_map_.keys())]
+        return [self.data_map_[date] for date in sorted(self.data_map_.keys())]
 
 class live_data:
     def __init__(self, dict):
@@ -100,6 +106,34 @@ class live_data:
         return float(self.dict_["TwoHundreddayMovingAverage"])
     def moving_avg_50(self):
         return float(self.dict_["FiftydayMovingAverage"])
+    def headers(self):
+        return ["symbol","bid","ask","volume","change_pct","200avg","50avg"]
+    def values(self):
+        return [self.symbol(), self.bid(), self.ask(), self.volume(), self.change_pct(), self.moving_avg_200(), self.moving_avg_50()]
+    def __str__(self):
+        return "%s,%.2f,%.2f,%d,%s,%.2f,%.2f" % (self.symbol(), self.bid(), self.ask(), self.volume(), self.change_pct(), self.moving_avg_200(), self.moving_avg_50())
+
+class console_sink:
+    def __init__(self, csv=True):
+        self.csv_ = csv
+    def log_live(self, data):
+        body = "symbol,bid,ask,volume,change_pct,200avg,50avg\n"
+        for d in data:
+            body += "%s,%.2f,%.2f,%d,%s,%.2f,%.2f\n" % (d.symbol(), d.bid(), d.ask(), d.volume(), d.change_pct(), d.moving_avg_200(), d.moving_avg_50())
+        print(body)
+
+    def log_hist(self, data, filter=None):
+        headers = ["symbol","date","volume","high","low","close","open","aclose"]
+        
+        if self.csv_:
+            body = ",".join(headers) + "\n"
+            for symbol in data:
+                for d in data[symbol].items():
+                    if filter is None or filter(d):
+                        body += str(d)
+            print(body)
+        else:
+            pass
         
 class driver:
     def __init__(self, symbols, options):
@@ -114,17 +148,13 @@ class driver:
         if self.request_.prepare_live(self.symbols_):
             r = self.request_.send()
             if r is not None:
-                for e in r:
-                    self.data_.append(live_data(e))
+                if isinstance(r, list):
+                    for e in r: self.data_.append(live_data(e))
+                else:
+                    self.data_.append(live_data(r))
             else:
                 print("No live prices received for: %s" % str(self.symbols_))
     
-    def show_live(self):
-        body = "symbol,bid,ask,volume,change_pct,200avg,50avg\n"
-        for d in self.data_:
-            body += "%s,%.2f,%.2f,%d,%s,%.2f,%.2f\n" % (d.symbol(), d.bid(), d.ask(), d.volume(), d.change_pct(), d.moving_avg_200(), d.moving_avg_50())
-        print(body)
-
     def fetch_hist(self):
         assert len(self.symbols_) > 0
         self.data_ = {}
@@ -139,16 +169,9 @@ class driver:
                     self.data_[e["Symbol"]].add(hist_price_data(e))
             else:
                 print("No historical prices received for: %s\n" % str(self.symbols_))
-            
-    def show_hist(self):
-        body = "symbol,date,volume,high,low,close,open,aclose\n" 
-        for n in self.data_:
-            hdata = self.data_[n]
-            for d in hdata.items():
-                if d.volume() == 0 and self.options_.ignore_zero_vol:
-                    continue
-                body += "%s,%s,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n" % (d.symbol(), d.date(), d.volume(), d.high(), d.low(), d.close(), d.open(), d.adj_close())
-        print(body)
+    
+    def data(self):
+        return self.data_
 
 if __name__ == "__main__":
     usage = "usage: %prog [options] <symbol1> [<symbol2>..<symbolN>]"
@@ -156,6 +179,11 @@ if __name__ == "__main__":
     opt.add_option("-s", dest="start", default=None, help="start date")
     opt.add_option("-e", dest="end", default=None, help="end date")
     opt.add_option("-i", dest="ignore_zero_vol", action="store_true", default=False, help="ignore 0 total volume")
+    opt.add_option("--sql", dest="sql", action="store_true", default=False, help="output to sql")
+    opt.add_option("-u", dest="user", default=SQL.user, help="sql username")
+    opt.add_option("-p", dest="pwd", default=SQL.pwd, help="sql password")
+    opt.add_option("--host", dest="host", default=SQL.host, help="sql host")
+    opt.add_option("-d", dest="db", default=SQL.db, help="sql database")
     
     try:
         (options, args) = opt.parse_args()
@@ -166,11 +194,16 @@ if __name__ == "__main__":
         s = driver(args, options)
         if options.start is None or options.end is None:
             s.fetch_live()
-            s.show_live()
+            out = console_sink()
+            out.log_live(s.data())
         else:
             s.fetch_hist()
-            s.show_hist()
-            
+            if options.sql:
+                out = sql_sink(options.db, options.host, options.user, options.pwd)
+            else:
+                out = console_sink()
+            out.log_hist(s.data(), lambda d: True if not options.ignore_zero_vol or d.volume() > 0 else False)
+
     except Exception as e:
         exc_type, exc_value, exc_traceback = sys.exc_info()
         import traceback
