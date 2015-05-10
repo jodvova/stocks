@@ -53,8 +53,9 @@ class driver:
             else:
                 self.errors_[symbol] = driver.request_failed_error % symbol
             count += 1
-            if count == 10:
-                time.sleep(1)
+            #if count == 10:
+            #    time.sleep(1)
+        print("Fetched %d records" % count)
         return True
 
     def errors(self):
